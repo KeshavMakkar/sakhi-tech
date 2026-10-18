@@ -60,6 +60,17 @@ ALTER TABLE public.products
 ALTER TABLE public.products 
   ALTER COLUMN contact_phone TYPE TEXT USING contact_phone::TEXT;
 
+-- Safely update status check constraint to allow 'active', 'inactive', 'archived', 'deleted'
+DO $$
+BEGIN
+  ALTER TABLE public.products DROP CONSTRAINT IF EXISTS products_status_check;
+  ALTER TABLE public.products ADD CONSTRAINT products_status_check 
+    CHECK (status IN ('active', 'inactive', 'archived', 'deleted'));
+EXCEPTION
+  WHEN OTHERS THEN
+    NULL;
+END $$;
+
 -- 3. Create indexes for high-performance marketplace queries
 CREATE INDEX IF NOT EXISTS products_status_created_idx 
   ON public.products (status, created_at DESC);

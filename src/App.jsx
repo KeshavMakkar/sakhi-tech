@@ -269,6 +269,8 @@ function SakhiApp() {
         // Successful DB update: remove immediately from visible list
         setProducts((prev) => prev.filter((p) => p.id !== productId));
         setDeletedProductRecord({ product: target });
+        // Refresh marketplace from shared database
+        loadProducts();
       } catch (err) {
         console.error('[App] handleDeleteProduct exception:', err);
         setDeleteError(err.message || 'An unexpected error occurred while deleting the product.');
@@ -289,12 +291,13 @@ function SakhiApp() {
 
     if (isSupabaseConfigured && product._fromDb) {
       try {
-        const { error } = await restoreProduct(product.id);
+        const { error } = await restoreProduct(product);
         if (error) {
           console.error('[App] restoreProduct error:', error);
           setDeleteError(error);
           return;
         }
+        await loadProducts();
       } catch (err) {
         console.error('[App] handleUndoDelete exception:', err);
         setDeleteError(err.message || 'An unexpected error occurred while restoring the product.');

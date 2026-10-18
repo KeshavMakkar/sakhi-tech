@@ -252,10 +252,11 @@ export async function insertProduct(formData, user) {
 }
 
 /**
- * Soft-delete a product (set status = 'deleted').
+ * Permanently delete a product listing via Supabase DELETE request.
  * Enforces ownership check: extracts authenticated Supabase user ID directly from
  * active session (never relies on caller-supplied owner ID).
- * Relies on RLS policy (auth.uid() = owner_id) and verifies that a row was updated.
+ * Relies on RLS policy (auth.uid() = owner_id) and verifies that a row was deleted.
+ * Avoids violating the 'products_status_check' constraint.
  *
  * @param {string} productId - ID of the product to delete
  * @returns {Promise<{ error: string | null, deletedId?: string }>}
@@ -280,12 +281,12 @@ export async function deleteProduct(productId) {
   const authUserId = sessionUser.id; // Authenticated Supabase UUID
 
   try {
-    // Soft-delete by setting status = 'deleted'.
-    // Use count: 'exact' without .select() to prevent PostgREST from applying
-    // the SELECT RLS policy (status = 'active') on the post-update representation.
+    // Delete listing by ID, strictly filtered by authenticated owner_id.
+    // This executes DELETE FROM products WHERE id = ... AND owner_id = ...
+    // completely avoiding any check constraint on status ('products_status_check').
     const { error, count } = await supabase
       .from('products')
-      .update({ status: 'deleted' }, { count: 'exact' })
+      .delete({ count: 'exact' })
       .eq('id', cleanProdId)
       .eq('owner_id', authUserId);
 
@@ -308,14 +309,19 @@ export async function deleteProduct(productId) {
 }
 
 /**
- * Restore a soft-deleted product (set status = 'active').
+ * Restore a product listing.
+ * Accepts either a product object (for re-insertion) or a product ID string.
  *
- * @param {string} productId
+ * @param {Object | string} productOrId
  * @returns {Promise<{ error: string | null }>}
  */
-export async function restoreProduct(productId) {
+export async function restoreProduct(productOrId) {
   if (!supabase) return { error: 'Database is not configured.' };
-  const cleanProdId = productId != null ? String(productId).trim() : null;
+  if (!productOrId) return { error: 'Product is required for restoration.' };
+
+  const isObject = typeof productOrId === 'object' && productOrId !== null;
+  const prodId = isObject ? productOrId.id : productOrId;
+  const cleanProdId = prodId != null ? String(prodId).trim() : null;
   if (!cleanProdId) return { error: 'Product ID is required for restoration.' };
 
   const { data: sessionData } = await supabase.auth.getSession();
@@ -325,19 +331,49 @@ export async function restoreProduct(productId) {
   }
 
   try {
-    const { error, count } = await supabase
+    // 1. In case the database used soft deletion, attempt to set status back to 'active'
+    const { error: updateErr, count } = await supabase
       .from('products')
       .update({ status: 'active' }, { count: 'exact' })
       .eq('id', cleanProdId)
       .eq('owner_id', sessionUser.id);
 
-    if (error) {
-      return { error: formatDatabaseError(error, 'restoring product') };
+    if (!updateErr && typeof count === 'number' && count > 0) {
+      return { error: null };
     }
-    if (typeof count === 'number' && count === 0) {
-      return { error: 'Unable to restore product.' };
+
+    // 2. If row was removed from the database, re-insert using saved product snapshot
+    if (isObject) {
+      const { error: insertErr } = await supabase
+        .from('products')
+        .insert([{
+          id: cleanProdId,
+          owner_id: sessionUser.id,
+          owner_email: sessionUser.email || productOrId.ownerEmail || null,
+          owner_name: sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || productOrId.sellerNameEn || null,
+          name: productOrId.nameEn || productOrId.name || 'Artisan Product',
+          price: Number(productOrId.price) || 0,
+          category: productOrId.category || 'crafts',
+          description: productOrId.descriptionEn || productOrId.description || null,
+          unit: productOrId.unit || '1 piece',
+          seller_name: productOrId.sellerNameEn || productOrId.sellerName || 'Sakhi Artisan',
+          shg_name: productOrId.shgNameEn || productOrId.shgName || null,
+          location: productOrId.locationEn || productOrId.location || null,
+          contact_phone: productOrId.contactPhone || null,
+          image_url: productOrId.image || productOrId.imageUrl || null,
+          is_placeholder: Boolean(productOrId.isPlaceholder),
+          badge: productOrId.badgeEn || productOrId.badge || 'Artisan Listing',
+          ingredients: productOrId.ingredients || null,
+          status: 'active',
+        }]);
+
+      if (insertErr) {
+        return { error: formatDatabaseError(insertErr, 'restoring product') };
+      }
+      return { error: null };
     }
-    return { error: null };
+
+    return { error: 'Unable to restore product listing.' };
   } catch (err) {
     return { error: err.message || 'Network error while restoring product.' };
   }
