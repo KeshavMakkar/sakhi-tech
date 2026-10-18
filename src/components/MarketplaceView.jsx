@@ -9,6 +9,8 @@ import {
   Search, 
   MapPin, 
   X, 
+  Trash2,
+  CheckCircle,
   MessageCircle, 
   RefreshCw, 
   AlertTriangle, 
@@ -695,10 +697,14 @@ export default function MarketplaceView({
                 }}
                 disabled={Boolean(isDeletingId)}
                 onClick={async () => {
-                  const targetId = itemToDelete.id;
+                  const targetId = itemToDelete?.id;
                   setItemToDelete(null);
-                  if (onDeleteProduct) {
-                    await onDeleteProduct(targetId);
+                  if (onDeleteProduct && targetId) {
+                    try {
+                      await onDeleteProduct(targetId);
+                    } catch (err) {
+                      console.error('[MarketplaceView] Delete confirmation failed:', err);
+                    }
                   }
                 }}
               >

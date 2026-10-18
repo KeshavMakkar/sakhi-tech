@@ -8,6 +8,7 @@ import MarketplaceView from './components/MarketplaceView';
 import AddProductView from './components/AddProductView';
 import OpportunitiesView from './components/OpportunitiesView';
 import SignInView from './components/SignInView';
+import ErrorBoundary from './components/ErrorBoundary';
 import { AuthProvider } from './context/AuthContext';
 import { useAuth } from './context/AuthContext';
 import { INITIAL_PRODUCTS } from './data/products';
@@ -138,18 +139,21 @@ function SakhiApp() {
 
     const channel = subscribeToProducts({
       onInsert: (newProduct) => {
+        if (!newProduct?.id) return;
         setProducts((prev) => {
           if (prev.some((p) => p.id === newProduct.id)) return prev;
           return [newProduct, ...prev];
         });
       },
       onUpdate: (updatedProduct) => {
+        if (!updatedProduct?.id) return;
         setProducts((prev) =>
           prev.map((p) => (p.id === updatedProduct.id ? updatedProduct : p))
         );
       },
       onRemove: (removedProductId) => {
-        setProducts((prev) => prev.filter((p) => p.id !== removedProductId));
+        if (!removedProductId) return;
+        setProducts((prev) => prev.filter((p) => p.id !== String(removedProductId)));
       },
     });
 
@@ -251,20 +255,26 @@ function SakhiApp() {
     if (!target) return;
 
     if (isSupabaseConfigured && target._fromDb) {
-      setIsDeletingId(productId);
-      const { error } = await deleteProduct(productId);
-      setIsDeletingId(null);
+      try {
+        setIsDeletingId(productId);
+        const { error } = await deleteProduct(productId);
 
-      if (error) {
-        // If DB update fails, keep listing visible and show clear error
-        console.error('[App] deleteProduct error:', error);
-        setDeleteError(error);
-        return;
+        if (error) {
+          // If DB update fails, keep listing visible and show clear error
+          console.error('[App] deleteProduct error:', error);
+          setDeleteError(error);
+          return;
+        }
+
+        // Successful DB update: remove immediately from visible list
+        setProducts((prev) => prev.filter((p) => p.id !== productId));
+        setDeletedProductRecord({ product: target });
+      } catch (err) {
+        console.error('[App] handleDeleteProduct exception:', err);
+        setDeleteError(err.message || 'An unexpected error occurred while deleting the product.');
+      } finally {
+        setIsDeletingId(null);
       }
-
-      // Successful DB update: remove immediately from visible list
-      setProducts((prev) => prev.filter((p) => p.id !== productId));
-      setDeletedProductRecord({ product: target });
     } else {
       // Local demo seed item
       setProducts((prev) => prev.filter((p) => p.id !== productId));
@@ -278,10 +288,16 @@ function SakhiApp() {
     setDeletedProductRecord(null);
 
     if (isSupabaseConfigured && product._fromDb) {
-      const { error } = await restoreProduct(product.id);
-      if (error) {
-        console.error('[App] restoreProduct error:', error);
-        setDeleteError(error);
+      try {
+        const { error } = await restoreProduct(product.id);
+        if (error) {
+          console.error('[App] restoreProduct error:', error);
+          setDeleteError(error);
+          return;
+        }
+      } catch (err) {
+        console.error('[App] handleUndoDelete exception:', err);
+        setDeleteError(err.message || 'An unexpected error occurred while restoring the product.');
         return;
       }
     }
@@ -338,24 +354,26 @@ function SakhiApp() {
         )}
 
         {currentTab === 'marketplace' && (
-          <MarketplaceView
-            products={products}
-            productsLoading={productsLoading}
-            productsError={productsError}
-            onRefresh={loadProducts}
-            selectedCategory={selectedCategory}
-            onSelectCategory={setSelectedCategory}
-            onSelectTab={handleSelectTab}
-            newlyAddedId={newlyAddedId}
-            lang={lang}
-            onDeleteProduct={handleDeleteProduct}
-            deletedRecord={deletedProductRecord}
-            onUndoDelete={handleUndoDelete}
-            currentUser={user}
-            deleteError={deleteError}
-            onClearDeleteError={() => setDeleteError(null)}
-            isDeletingId={isDeletingId}
-          />
+          <ErrorBoundary isolated lang={lang} onReset={loadProducts}>
+            <MarketplaceView
+              products={products}
+              productsLoading={productsLoading}
+              productsError={productsError}
+              onRefresh={loadProducts}
+              selectedCategory={selectedCategory}
+              onSelectCategory={setSelectedCategory}
+              onSelectTab={handleSelectTab}
+              newlyAddedId={newlyAddedId}
+              lang={lang}
+              onDeleteProduct={handleDeleteProduct}
+              deletedRecord={deletedProductRecord}
+              onUndoDelete={handleUndoDelete}
+              currentUser={user}
+              deleteError={deleteError}
+              onClearDeleteError={() => setDeleteError(null)}
+              isDeletingId={isDeletingId}
+            />
+          </ErrorBoundary>
         )}
 
         {currentTab === 'add-product' && (

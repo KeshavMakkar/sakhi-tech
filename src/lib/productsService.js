@@ -263,7 +263,7 @@ export async function insertProduct(formData, user) {
 export async function deleteProduct(productId) {
   if (!supabase) return { error: 'Database is not configured.' };
   
-  const cleanProdId = cleanString(productId);
+  const cleanProdId = productId != null ? String(productId).trim() : null;
   if (!cleanProdId) return { error: 'Product ID is required for deletion.' };
 
   // 1. Get authenticated Supabase session directly from Supabase Auth client
@@ -280,19 +280,21 @@ export async function deleteProduct(productId) {
   const authUserId = sessionUser.id; // Authenticated Supabase UUID
 
   try {
-    const { data, error } = await supabase
+    // Soft-delete by setting status = 'deleted'.
+    // Use count: 'exact' without .select() to prevent PostgREST from applying
+    // the SELECT RLS policy (status = 'active') on the post-update representation.
+    const { error, count } = await supabase
       .from('products')
-      .update({ status: 'deleted', updated_at: new Date().toISOString() })
+      .update({ status: 'deleted' }, { count: 'exact' })
       .eq('id', cleanProdId)
-      .eq('owner_id', authUserId)
-      .select('id, status');
+      .eq('owner_id', authUserId);
 
     if (error) {
       console.error('[productsService] deleteProduct error:', error);
       return { error: formatDatabaseError(error, 'deleting product') };
     }
 
-    if (!data || data.length === 0) {
+    if (typeof count === 'number' && count === 0) {
       return { 
         error: 'Unable to remove listing. Either the product was already removed or you do not have permission to delete it.' 
       };
@@ -313,7 +315,7 @@ export async function deleteProduct(productId) {
  */
 export async function restoreProduct(productId) {
   if (!supabase) return { error: 'Database is not configured.' };
-  const cleanProdId = cleanString(productId);
+  const cleanProdId = productId != null ? String(productId).trim() : null;
   if (!cleanProdId) return { error: 'Product ID is required for restoration.' };
 
   const { data: sessionData } = await supabase.auth.getSession();
@@ -323,17 +325,16 @@ export async function restoreProduct(productId) {
   }
 
   try {
-    const { data, error } = await supabase
+    const { error, count } = await supabase
       .from('products')
-      .update({ status: 'active', updated_at: new Date().toISOString() })
+      .update({ status: 'active' }, { count: 'exact' })
       .eq('id', cleanProdId)
-      .eq('owner_id', sessionUser.id)
-      .select('id, status');
+      .eq('owner_id', sessionUser.id);
 
     if (error) {
       return { error: formatDatabaseError(error, 'restoring product') };
     }
-    if (!data || data.length === 0) {
+    if (typeof count === 'number' && count === 0) {
       return { error: 'Unable to restore product.' };
     }
     return { error: null };
