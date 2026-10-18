@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" width="100%" height="100%">
+  <defs>
+    <linearGradient id="farmingBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F0FDF4"/>
+      <stop offset="50%" stop-color="#DCFCE7"/>
+      <stop offset="100%" stop-color="#BBF7D0"/>
+    </linearGradient>
+    <linearGradient id="farmingBadge" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#16A34A"/>
+      <stop offset="100%" stop-color="#15803D"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="600" fill="url(#farmingBg)"/>
+
+  <!-- Subtle Decorative Grid / Pattern -->
+  <g opacity="0.06" stroke="#14532D" stroke-width="1.5" fill="none">
+    <circle cx="400" cy="270" r="180"/>
+    <circle cx="400" cy="270" r="220" stroke-dasharray="6,6"/>
+    <circle cx="400" cy="270" r="260"/>
+  </g>
+
+  <!-- Decorative Corner Accents -->
+  <g stroke="#16A34A" stroke-width="2" fill="none" opacity="0.4">
+    <path d="M 40 70 L 40 40 L 70 40"/>
+    <path d="M 760 70 L 760 40 L 730 40"/>
+    <path d="M 40 530 L 40 560 L 70 560"/>
+    <path d="M 760 530 L 760 560 L 730 560"/>
+  </g>
+
+  <!-- Central Icon Container -->
+  <circle cx="400" cy="250" r="76" fill="#FFFFFF" filter="drop-shadow(0px 8px 16px rgba(21, 128, 61, 0.12))"/>
+  <circle cx="400" cy="250" r="66" fill="url(#farmingBadge)"/>
+
+  <!-- Wheat / Farming Sprout Motif -->
+  <g fill="#FFFFFF" transform="translate(400, 250)">
+    <!-- Central stalk -->
+    <line x1="0" y1="-32" x2="0" y2="30" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round"/>
+    <!-- Grains / leaves -->
+    <ellipse cx="0" cy="-30" rx="4" ry="8" fill="#FFFFFF"/>
+    <ellipse cx="-10" cy="-20" rx="4" ry="9" transform="rotate(-30, -10, -20)" fill="#FFFFFF"/>
+    <ellipse cx="10" cy="-20" rx="4" ry="9" transform="rotate(30, 10, -20)" fill="#FFFFFF"/>
+    <ellipse cx="-12" cy="-8" rx="4.5" ry="10" transform="rotate(-35, -12, -8)" fill="#FFFFFF"/>
+    <ellipse cx="12" cy="-8" rx="4.5" ry="10" transform="rotate(35, 12, -8)" fill="#FFFFFF"/>
+    <ellipse cx="-12" cy="6" rx="4.5" ry="10" transform="rotate(-40, -12, 6)" fill="#FFFFFF"/>
+    <ellipse cx="12" cy="6" rx="4.5" ry="10" transform="rotate(40, 12, 6)" fill="#FFFFFF"/>
+  </g>
+
+  <!-- Category Title & Subtitle -->
+  <text x="400" y="375" text-anchor="middle" font-family="Plus Jakarta Sans, sans-serif" font-size="28" font-weight="800" fill="#14532D">
+    Farming &amp; Fresh Dairy
+  </text>
+  <text x="400" y="410" text-anchor="middle" font-family="Noto Sans Devanagari, sans-serif" font-size="20" font-weight="600" fill="#15803D">
+    खेती व ताज़ा डेयरी श्रेणी
+  </text>
+
+  <!-- Neutral Placeholder Notice Pill -->
+  <rect x="250" y="445" width="300" height="38" rx="19" fill="#FFFFFF" stroke="#86EFAC" stroke-width="1.5"/>
+  <circle cx="272" cy="464" r="5" fill="#16A34A"/>
+  <text x="405" y="469" text-anchor="middle" font-family="Plus Jakarta Sans, sans-serif" font-size="14" font-weight="700" fill="#15803D">
+    CATEGORY PLACEHOLDER
+  </text>
+</svg>
