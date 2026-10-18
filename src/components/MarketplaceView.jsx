@@ -8,19 +8,12 @@ import {
   Store, 
   Search, 
   MapPin, 
-  Phone, 
-  Sparkles, 
-  CheckCircle, 
   X, 
-  Trash2,
   MessageCircle, 
-  SlidersHorizontal,
-  ChevronRight,
-  Filter,
-  RefreshCw,
-  AlertTriangle,
-  Database,
-  Loader
+  RefreshCw, 
+  AlertTriangle, 
+  Database, 
+  Loader 
 } from 'lucide-react';
 
 export default function MarketplaceView({ 
@@ -30,13 +23,16 @@ export default function MarketplaceView({
   onRefresh,
   selectedCategory, 
   onSelectCategory, 
-  onSelectTab,
+  onSelectTab: _onSelectTab,
   newlyAddedId,
   lang,
   onDeleteProduct,
   deletedRecord,
   onUndoDelete,
-  currentUser
+  currentUser,
+  deleteError,
+  onClearDeleteError,
+  isDeletingId
 }) {
   const t = TRANSLATIONS[lang];
   const [searchTerm, setSearchTerm] = useState('');
@@ -162,6 +158,39 @@ export default function MarketplaceView({
             <button className="btn btn-secondary" style={{ padding: '6px 14px', fontSize: '0.82rem' }} onClick={onRefresh}>
               <RefreshCw size={14} />
               <span>{lang === 'hi' ? 'पुन: प्रयास' : 'Retry'}</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* ── Deletion error notification ─────────────────────────────── */}
+      {deleteError && (
+        <div style={{
+          background: '#FEF2F2',
+          border: '1.5px solid #F87171',
+          borderRadius: 'var(--radius-md)',
+          padding: '14px 18px',
+          marginBottom: 20,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 12
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <AlertTriangle size={18} style={{ color: '#DC2626', flexShrink: 0 }} />
+            <span style={{ fontSize: '0.88rem', color: '#B91C1C', fontWeight: 600 }}>
+              {deleteError}
+            </span>
+          </div>
+          {onClearDeleteError && (
+            <button 
+              type="button"
+              className="search-clear-btn"
+              onClick={onClearDeleteError}
+              aria-label="Dismiss error"
+              style={{ position: 'static', color: '#B91C1C' }}
+            >
+              <X size={16} />
             </button>
           )}
         </div>
@@ -357,12 +386,17 @@ export default function MarketplaceView({
                       className="item-delete-btn"
                       title={t.deleteItemTooltip}
                       aria-label={t.deleteItemTooltip}
+                      disabled={isDeletingId === product.id}
                       onClick={(e) => {
                         e.stopPropagation();
                         setItemToDelete(product);
                       }}
                     >
-                      <X size={15} />
+                      {isDeletingId === product.id ? (
+                        <Loader size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                      ) : (
+                        <X size={15} />
+                      )}
                     </button>
                   )}
                 </div>
@@ -640,6 +674,7 @@ export default function MarketplaceView({
                 type="button"
                 className="btn btn-secondary" 
                 onClick={() => setItemToDelete(null)}
+                disabled={Boolean(isDeletingId)}
               >
                 {t.cancelBtn}
               </button>
@@ -653,16 +688,28 @@ export default function MarketplaceView({
                   borderRadius: 'var(--radius-full)',
                   padding: '8px 18px',
                   fontWeight: 700,
-                  cursor: 'pointer'
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6
                 }}
-                onClick={() => {
-                  if (onDeleteProduct) {
-                    onDeleteProduct(itemToDelete.id);
-                  }
+                disabled={Boolean(isDeletingId)}
+                onClick={async () => {
+                  const targetId = itemToDelete.id;
                   setItemToDelete(null);
+                  if (onDeleteProduct) {
+                    await onDeleteProduct(targetId);
+                  }
                 }}
               >
-                {t.confirmDeleteBtn}
+                {isDeletingId === itemToDelete.id ? (
+                  <>
+                    <Loader size={16} style={{ animation: 'spin 1s linear infinite' }} />
+                    <span>{lang === 'hi' ? 'हटा रहे हैं…' : 'Removing…'}</span>
+                  </>
+                ) : (
+                  <span>{t.confirmDeleteBtn}</span>
+                )}
               </button>
             </div>
           </div>

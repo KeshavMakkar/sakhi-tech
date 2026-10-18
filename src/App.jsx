@@ -16,8 +16,24 @@ import { isSupabaseConfigured } from './lib/supabase';
 import {
   fetchProducts,
   deleteProduct,
+  restoreProduct,
   subscribeToProducts,
 } from './lib/productsService';
+
+const LANGUAGE_STORAGE_KEY = 'sakhi_user_language_pref';
+
+function getInitialLanguage() {
+  if (typeof window === 'undefined') return 'en';
+  try {
+    const saved = localStorage.getItem(LANGUAGE_STORAGE_KEY);
+    if (saved === 'hi' || saved === 'en') {
+      return saved;
+    }
+  } catch {
+    // fallback
+  }
+  return 'en'; // default to English only if no preference has been saved
+}
 
 // localStorage is only used for UI preferences (route, language)
 // Products now live in Supabase – never in localStorage
@@ -59,12 +75,14 @@ const DEMO_PRODUCTS = INITIAL_PRODUCTS;
 
 function SakhiApp() {
   const { user } = useAuth();
-  const [lang, setLang] = useState('hi'); // Default to Hindi for authentic rural connection, toggleable to English anytime
+  const [lang, setLang] = useState(getInitialLanguage);
   const [currentTab, setCurrentTab] = useState(getRouteFromLocation);
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [calculatedPrice, setCalculatedPrice] = useState(null);
   const [newlyAddedId, setNewlyAddedId] = useState(null);
   const [deletedProductRecord, setDeletedProductRecord] = useState(null);
+  const [deleteError, setDeleteError] = useState(null);
+  const [isDeletingId, setIsDeletingId] = useState(null);
 
   // ── Supabase product state ─────────────────────────────────────
   const [products, setProducts] = useState([]);
@@ -114,16 +132,27 @@ function SakhiApp() {
     }
   }, [currentTab, loadProducts]);
 
-  // Supabase Realtime: add new listings without a manual refresh
+  // Supabase Realtime: sync additions and removals across browsers immediately
   useEffect(() => {
     if (!isSupabaseConfigured) return;
-    const channel = subscribeToProducts((newProduct) => {
-      setProducts((prev) => {
-        // Avoid duplicates (our own optimistic insert arrives first)
-        if (prev.some((p) => p.id === newProduct.id)) return prev;
-        return [newProduct, ...prev];
-      });
+
+    const channel = subscribeToProducts({
+      onInsert: (newProduct) => {
+        setProducts((prev) => {
+          if (prev.some((p) => p.id === newProduct.id)) return prev;
+          return [newProduct, ...prev];
+        });
+      },
+      onUpdate: (updatedProduct) => {
+        setProducts((prev) =>
+          prev.map((p) => (p.id === updatedProduct.id ? updatedProduct : p))
+        );
+      },
+      onRemove: (removedProductId) => {
+        setProducts((prev) => prev.filter((p) => p.id !== removedProductId));
+      },
     });
+
     return () => {
       channel?.unsubscribe();
     };
@@ -172,8 +201,24 @@ function SakhiApp() {
   }, []);
 
   const toggleLanguage = () => {
-    setLang(prev => (prev === 'en' ? 'hi' : 'en'));
+    setLang((prev) => {
+      const next = prev === 'en' ? 'hi' : 'en';
+      try {
+        localStorage.setItem(LANGUAGE_STORAGE_KEY, next);
+      } catch {
+        // ignore
+      }
+      return next;
+    });
   };
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LANGUAGE_STORAGE_KEY, lang);
+    } catch {
+      // ignore
+    }
+  }, [lang]);
 
   const handleSelectCategory = (catId) => {
     setSelectedCategory(catId);
@@ -199,41 +244,52 @@ function SakhiApp() {
     handleSelectTab('marketplace');
   };
 
-  // Delete product with Undo support
+  // Delete product: only remove from visible list AFTER successful database update
   const handleDeleteProduct = async (productId) => {
-    const index = products.findIndex((p) => p.id === productId);
-    if (index === -1) return;
-    const removed = products[index];
+    setDeleteError(null);
+    const target = products.find((p) => p.id === productId);
+    if (!target) return;
 
-    // Optimistic UI update first
-    setProducts((prev) => prev.filter((p) => p.id !== productId));
-    setDeletedProductRecord({ product: removed, index });
+    if (isSupabaseConfigured && target._fromDb) {
+      setIsDeletingId(productId);
+      const { error } = await deleteProduct(productId);
+      setIsDeletingId(null);
 
-    // If this was a real DB product, soft-delete it
-    if (isSupabaseConfigured && removed._fromDb && user?.id) {
-      const { error } = await deleteProduct(productId, user.id);
       if (error) {
-        // Roll back on failure
-        setProducts((prev) => {
-          const copy = [...prev];
-          copy.splice(index, 0, removed);
-          return copy;
-        });
-        setDeletedProductRecord(null);
+        // If DB update fails, keep listing visible and show clear error
         console.error('[App] deleteProduct error:', error);
+        setDeleteError(error);
+        return;
       }
+
+      // Successful DB update: remove immediately from visible list
+      setProducts((prev) => prev.filter((p) => p.id !== productId));
+      setDeletedProductRecord({ product: target });
+    } else {
+      // Local demo seed item
+      setProducts((prev) => prev.filter((p) => p.id !== productId));
+      setDeletedProductRecord({ product: target });
     }
   };
 
-  const handleUndoDelete = () => {
+  const handleUndoDelete = async () => {
     if (!deletedProductRecord) return;
-    const { product, index } = deletedProductRecord;
-    setProducts(prev => {
-      const copy = [...prev];
-      copy.splice(index, 0, product);
-      return copy;
-    });
+    const { product } = deletedProductRecord;
     setDeletedProductRecord(null);
+
+    if (isSupabaseConfigured && product._fromDb) {
+      const { error } = await restoreProduct(product.id);
+      if (error) {
+        console.error('[App] restoreProduct error:', error);
+        setDeleteError(error);
+        return;
+      }
+    }
+
+    setProducts((prev) => {
+      if (prev.some((p) => p.id === product.id)) return prev;
+      return [product, ...prev];
+    });
   };
 
   // Auto dismiss undo toast after 6s
@@ -296,6 +352,9 @@ function SakhiApp() {
             deletedRecord={deletedProductRecord}
             onUndoDelete={handleUndoDelete}
             currentUser={user}
+            deleteError={deleteError}
+            onClearDeleteError={() => setDeleteError(null)}
+            isDeletingId={isDeletingId}
           />
         )}
 

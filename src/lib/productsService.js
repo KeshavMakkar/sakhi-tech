@@ -253,43 +253,92 @@ export async function insertProduct(formData, user) {
 
 /**
  * Soft-delete a product (set status = 'deleted').
- * Enforces ownership check: only the listing owner can delete their item.
+ * Enforces ownership check: extracts authenticated Supabase user ID directly from
+ * active session (never relies on caller-supplied owner ID).
+ * Relies on RLS policy (auth.uid() = owner_id) and verifies that a row was updated.
  *
- * @param {string} productId
- * @param {string} userId - Supabase user UUID
- * @returns {Promise<{ error: string | null }>}
+ * @param {string} productId - ID of the product to delete
+ * @returns {Promise<{ error: string | null, deletedId?: string }>}
  */
-export async function deleteProduct(productId, userId) {
-  if (!supabase) return { error: 'not_configured' };
+export async function deleteProduct(productId) {
+  if (!supabase) return { error: 'Database is not configured.' };
   
   const cleanProdId = cleanString(productId);
   if (!cleanProdId) return { error: 'Product ID is required for deletion.' };
 
-  // Verify authenticated Supabase session
-  const { data: sessionData } = await supabase.auth.getSession();
-  const sessionUser = sessionData?.session?.user;
-  const ownerUuid = sessionUser?.id || userId;
-
-  if (!ownerUuid || !UUID_REGEX.test(ownerUuid)) {
-    return { error: 'Authentication required. Please sign in to delete a listing.' };
+  // 1. Get authenticated Supabase session directly from Supabase Auth client
+  const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
+  if (sessionErr) {
+    return { error: `Authentication error: ${sessionErr.message}` };
   }
 
+  const sessionUser = sessionData?.session?.user;
+  if (!sessionUser?.id || !UUID_REGEX.test(sessionUser.id)) {
+    return { error: 'You must be signed in with Google to delete your listing.' };
+  }
+
+  const authUserId = sessionUser.id; // Authenticated Supabase UUID
+
   try {
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from('products')
       .update({ status: 'deleted', updated_at: new Date().toISOString() })
       .eq('id', cleanProdId)
-      .eq('owner_id', ownerUuid);
+      .eq('owner_id', authUserId)
+      .select('id, status');
 
     if (error) {
       console.error('[productsService] deleteProduct error:', error);
       return { error: formatDatabaseError(error, 'deleting product') };
     }
 
-    return { error: null };
+    if (!data || data.length === 0) {
+      return { 
+        error: 'Unable to remove listing. Either the product was already removed or you do not have permission to delete it.' 
+      };
+    }
+
+    return { error: null, deletedId: cleanProdId };
   } catch (err) {
     console.error('[productsService] deleteProduct unexpected exception:', err);
-    return { error: err.message || 'Network error while deleting listing' };
+    return { error: err.message || 'Network error while deleting listing.' };
+  }
+}
+
+/**
+ * Restore a soft-deleted product (set status = 'active').
+ *
+ * @param {string} productId
+ * @returns {Promise<{ error: string | null }>}
+ */
+export async function restoreProduct(productId) {
+  if (!supabase) return { error: 'Database is not configured.' };
+  const cleanProdId = cleanString(productId);
+  if (!cleanProdId) return { error: 'Product ID is required for restoration.' };
+
+  const { data: sessionData } = await supabase.auth.getSession();
+  const sessionUser = sessionData?.session?.user;
+  if (!sessionUser?.id || !UUID_REGEX.test(sessionUser.id)) {
+    return { error: 'Authentication required to restore listing.' };
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('products')
+      .update({ status: 'active', updated_at: new Date().toISOString() })
+      .eq('id', cleanProdId)
+      .eq('owner_id', sessionUser.id)
+      .select('id, status');
+
+    if (error) {
+      return { error: formatDatabaseError(error, 'restoring product') };
+    }
+    if (!data || data.length === 0) {
+      return { error: 'Unable to restore product.' };
+    }
+    return { error: null };
+  } catch (err) {
+    return { error: err.message || 'Network error while restoring product.' };
   }
 }
 
@@ -298,7 +347,7 @@ export async function deleteProduct(productId, userId) {
  * Bucket must have public read enabled and authenticated write policy.
  *
  * @param {File} file
- * @param {string} userId - Supabase user UUID
+ * @param {string} [userId] - Optional fallback user ID
  * @returns {Promise<{ url: string | null, error: string | null }>}
  */
 export async function uploadProductImage(file, userId) {
@@ -344,13 +393,19 @@ export async function uploadProductImage(file, userId) {
 }
 
 /**
- * Subscribe to realtime INSERT events on public.products.
- * Returns the channel object (call channel.unsubscribe() to cleanup).
+ * Subscribe to realtime events on public.products.
+ * Listens for INSERT, UPDATE, and DELETE events so removals propagate
+ * across all connected browsers immediately.
  *
- * @param {(product: Object) => void} onNewProduct
+ * @param {Function | Object} handlers - Callback for inserts or { onInsert, onUpdate, onRemove }
+ * @returns {Object | null} Channel object
  */
-export function subscribeToProducts(onNewProduct) {
+export function subscribeToProducts(handlers) {
   if (!supabase) return null;
+
+  const onInsert = typeof handlers === 'function' ? handlers : handlers?.onInsert;
+  const onUpdate = typeof handlers === 'object' ? handlers?.onUpdate : null;
+  const onRemove = typeof handlers === 'object' ? handlers?.onRemove : null;
 
   try {
     const channel = supabase
@@ -359,9 +414,36 @@ export function subscribeToProducts(onNewProduct) {
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'products' },
         (payload) => {
-          if (payload.new?.status === 'active') {
+          if (payload.new?.status === 'active' && onInsert) {
             const mapped = rowToProduct(payload.new);
-            if (mapped) onNewProduct(mapped);
+            if (mapped) onInsert(mapped);
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'products' },
+        (payload) => {
+          if (!payload.new) return;
+          if (payload.new.status === 'active') {
+            if (onUpdate) {
+              const mapped = rowToProduct(payload.new);
+              if (mapped) onUpdate(mapped);
+            }
+          } else {
+            // Status changed to inactive/deleted: remove immediately from visible listings
+            if (onRemove && payload.new.id) {
+              onRemove(String(payload.new.id));
+            }
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'products' },
+        (payload) => {
+          if (onRemove && payload.old?.id) {
+            onRemove(String(payload.old.id));
           }
         }
       )
