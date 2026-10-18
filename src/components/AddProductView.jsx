@@ -4,6 +4,8 @@ import { CATEGORIES } from '../data/categories';
 import { PRESET_IMAGE_OPTIONS, getCategoryPlaceholder } from '../data/products';
 import { TRANSLATIONS } from '../data/translations';
 import { useAuth } from '../context/AuthContext';
+import { isSupabaseConfigured } from '../lib/supabase';
+import { insertProduct, uploadProductImage } from '../lib/productsService';
 import { 
   PlusCircle, 
   Upload, 
@@ -15,7 +17,9 @@ import {
   Store, 
   RefreshCw,
   ShieldCheck,
-  LogIn
+  LogIn,
+  Loader,
+  Database
 } from 'lucide-react';
 
 export default function AddProductView({ 
@@ -40,6 +44,9 @@ export default function AddProductView({
   const [description, setDescription] = useState('');
   const [selectedImage, setSelectedImage] = useState(PRESET_IMAGE_OPTIONS[0].url);
   const [customImageFile, setCustomImageFile] = useState(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [submitError, setSubmitError] = useState(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Auto-fill artisan name if logged in
   useEffect(() => {
@@ -60,14 +67,14 @@ export default function AddProductView({
     }
   }, [initialPrice]);
 
-  // Handle custom image upload
+  // Handle custom image upload (preview only – actual upload happens on submit)
   const handleImageUpload = (e) => {
     const file = e.target.files[0];
     if (file) {
+      setCustomImageFile(file);
       const reader = new FileReader();
       reader.onloadend = () => {
-        setSelectedImage(reader.result);
-        setCustomImageFile(file.name);
+        setSelectedImage(reader.result); // local preview
       };
       reader.readAsDataURL(file);
     }
@@ -84,7 +91,7 @@ export default function AddProductView({
     return errs;
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     const validationErrors = validate();
     if (Object.keys(validationErrors).length > 0) {
@@ -93,49 +100,107 @@ export default function AddProductView({
     }
 
     setErrors({});
+    setSubmitError(null);
+    setIsSubmitting(true);
 
-    const isPlaceholderImg = typeof selectedImage === 'string' && selectedImage.includes('/placeholders/');
-    const newProd = {
-      id: `prod-user-${Date.now()}`,
-      nameEn: name.trim(),
-      nameHi: name.trim(),
-      category,
+    const isPlaceholderImg =
+      typeof selectedImage === 'string' && selectedImage.startsWith('data:') === false && selectedImage.includes('/placeholders/');
+
+    // ── Upload image to Supabase Storage if user picked a file ──────
+    let imageUrl = isPlaceholderImg ? selectedImage : null;
+    let isPlaceholder = isPlaceholderImg;
+
+    if (customImageFile instanceof File && isSupabaseConfigured) {
+      setIsUploading(true);
+      const { url, error: uploadErr } = await uploadProductImage(customImageFile, user?.id);
+      setIsUploading(false);
+      if (uploadErr) {
+        // Non-fatal: fall back to placeholder so the listing still gets created
+        console.warn('[AddProduct] Image upload failed, using placeholder:', uploadErr);
+        imageUrl = getCategoryPlaceholder(category);
+        isPlaceholder = true;
+      } else {
+        imageUrl = url;
+        isPlaceholder = false;
+      }
+    } else if (customImageFile instanceof File) {
+      // Supabase not configured – use data-URL (local preview only, not cross-device)
+      imageUrl = selectedImage;
+      isPlaceholder = false;
+    } else if (!isPlaceholderImg) {
+      // User picked a preset that isn't a placeholder (e.g. the mango pickle photo)
+      imageUrl = selectedImage;
+      isPlaceholder = false;
+    }
+
+    const formData = {
+      name: name.trim(),
+      description: description.trim(),
       price: parseFloat(price),
       unit: unit.trim() || '1 pc',
-      sellerNameEn: sellerName.trim(),
-      sellerNameHi: sellerName.trim(),
-      shgNameEn: shgName.trim() || (lang === 'hi' ? 'सखी स्वयं सहायता समूह' : 'Sakhi Self Help Group'),
-      shgNameHi: shgName.trim() || (lang === 'hi' ? 'सखी स्वयं सहायता समूह' : 'Sakhi Self Help Group'),
-      locationEn: location.trim(),
-      locationHi: location.trim(),
-      image: selectedImage || getCategoryPlaceholder(category),
-      imageAlt: isPlaceholderImg 
-        ? `${name.trim()} - Category placeholder for ${category}` 
-        : `${name.trim()} artisan product photo`,
-      isPlaceholder: isPlaceholderImg,
-      descriptionEn: description.trim(),
-      descriptionHi: description.trim(),
-      contactPhone: phone.trim() || '+91 98290 12345',
-      userId: user?.id,
-      userEmail: user?.email,
-      inStock: true,
-      badgeEn: isPlaceholderImg ? 'Artisan Listing' : 'Photo Attached',
-      badgeHi: isPlaceholderImg ? 'कारीगर उत्पाद' : 'फोटो संलग्न'
+      category,
+      sellerName: sellerName.trim(),
+      shgName: shgName.trim(),
+      location: location.trim(),
+      phone: phone.trim() || '',
+      imageUrl: imageUrl || getCategoryPlaceholder(category),
+      isPlaceholder,
     };
+
+    // ── Save to Supabase (or fall back to in-memory if not configured) ──
+    let newProd;
+    if (isSupabaseConfigured) {
+      const { data, error } = await insertProduct(formData, user);
+      if (error) {
+        setSubmitError(
+          lang === 'hi'
+            ? `उत्पाद सहेजने में त्रुटि: ${error}`
+            : `Failed to save product: ${error}`
+        );
+        setIsSubmitting(false);
+        return;
+      }
+      newProd = data;
+    } else {
+      // Supabase not configured – optimistic in-memory product (demo mode)
+      newProd = {
+        id: `prod-local-${Date.now()}`,
+        nameEn: formData.name,
+        nameHi: formData.name,
+        category: formData.category,
+        price: formData.price,
+        unit: formData.unit,
+        sellerNameEn: formData.sellerName,
+        sellerNameHi: formData.sellerName,
+        shgNameEn: formData.shgName || 'Sakhi Self Help Group',
+        shgNameHi: formData.shgName || 'सखी स्वयं सहायता समूह',
+        locationEn: formData.location,
+        locationHi: formData.location,
+        image: formData.imageUrl,
+        imageAlt: formData.name + ' artisan product photo',
+        isPlaceholder: formData.isPlaceholder,
+        descriptionEn: formData.description,
+        descriptionHi: formData.description,
+        contactPhone: formData.phone || '+91 98290 12345',
+        userId: user?.id,
+        userEmail: user?.email,
+        inStock: true,
+        badgeEn: formData.isPlaceholder ? 'Artisan Listing' : 'Photo Attached',
+        badgeHi: formData.isPlaceholder ? 'कारीगर उत्पाद' : 'फोटो संलग्न',
+        _fromDb: false,
+      };
+    }
 
     // Confetti celebration!
     try {
-      confetti({
-        particleCount: 80,
-        spread: 70,
-        origin: { y: 0.6 }
-      });
+      confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 } });
     } catch {
       // safe fallback
     }
 
     setCreatedProduct(newProd);
     setIsSubmittedSuccess(true);
+    setIsSubmitting(false);
     onProductCreated(newProd);
   };
 
@@ -150,9 +215,11 @@ export default function AddProductView({
     setPhone('');
     setDescription('');
     setSelectedImage(PRESET_IMAGE_OPTIONS[0].url);
+    setCustomImageFile(null);
     setIsSubmittedSuccess(false);
     setCreatedProduct(null);
     setErrors({});
+    setSubmitError(null);
   };
 
   return (
@@ -577,14 +644,34 @@ export default function AddProductView({
                 </div>
               </div>
 
+              {/* Submit error */}
+              {submitError && (
+                <div style={{
+                  background: '#FEF2F2',
+                  border: '1px solid #F87171',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '12px 16px',
+                  fontSize: '0.85rem',
+                  color: '#B91C1C',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8
+                }}>
+                  <AlertCircle size={18} style={{ flexShrink: 0 }} />
+                  <span>{submitError}</span>
+                </div>
+              )}
+
               {/* Submit Button */}
               <button
                 type="submit"
                 className="btn btn-primary btn-block"
                 style={{ padding: '14px', fontSize: '1rem', marginTop: '10px' }}
+                disabled={isSubmitting || isUploading}
               >
-                <PlusCircle size={20} />
-                <span>{t.submitProductBtn}</span>
+                {isSubmitting || isUploading
+                  ? <><Loader size={18} style={{ animation: 'spin 1s linear infinite' }} /><span>{lang === 'hi' ? 'सहेज रहे हैं…' : 'Saving…'}</span></>
+                  : <><PlusCircle size={20} /><span>{t.submitProductBtn}</span></>}
               </button>
             </div>
           </form>

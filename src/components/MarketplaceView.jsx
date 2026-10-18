@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { CATEGORIES } from '../data/categories';
 import { TRANSLATIONS } from '../data/translations';
 import { getCategoryPlaceholder } from '../data/products';
+import { isSupabaseConfigured } from '../lib/supabase';
 import ContactModal from './ContactModal';
 import { 
   Store, 
@@ -15,11 +16,18 @@ import {
   MessageCircle, 
   SlidersHorizontal,
   ChevronRight,
-  Filter
+  Filter,
+  RefreshCw,
+  AlertTriangle,
+  Database,
+  Loader
 } from 'lucide-react';
 
 export default function MarketplaceView({ 
   products, 
+  productsLoading,
+  productsError,
+  onRefresh,
   selectedCategory, 
   onSelectCategory, 
   onSelectTab,
@@ -27,7 +35,8 @@ export default function MarketplaceView({
   lang,
   onDeleteProduct,
   deletedRecord,
-  onUndoDelete
+  onUndoDelete,
+  currentUser
 }) {
   const t = TRANSLATIONS[lang];
   const [searchTerm, setSearchTerm] = useState('');
@@ -85,6 +94,78 @@ export default function MarketplaceView({
         </h2>
         <p className="section-sub">{t.marketSub}</p>
       </div>
+
+      {/* ── Supabase not configured banner ─────────────────────────── */}
+      {!isSupabaseConfigured && (
+        <div style={{
+          background: '#FFFBEB',
+          border: '1.5px dashed #F59E0B',
+          borderRadius: 'var(--radius-lg)',
+          padding: '16px 20px',
+          marginBottom: 20,
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 12,
+          fontSize: '0.85rem'
+        }}>
+          <Database size={20} style={{ color: '#B45309', flexShrink: 0, marginTop: 2 }} />
+          <div>
+            <p style={{ fontWeight: 800, color: '#92400E', margin: '0 0 4px' }}>
+              {lang === 'hi' ? 'डेमो मोड: साझा डेटाबेस कॉन्फ़िगर नहीं हुआ' : 'Demo Mode – Shared Database Not Configured'}
+            </p>
+            <p style={{ color: '#78350F', margin: 0, lineHeight: 1.5 }}>
+              {lang === 'hi'
+                ? 'Vercel या .env में VITE_SUPABASE_URL और VITE_SUPABASE_ANON_KEY जोड़ने के बाद सभी डिवाइस पर एक ही उत्पाद सूची दिखेगी।'
+                : 'Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to .env and Vercel settings to share listings across all devices.'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Loading spinner ─────────────────────────────────────────── */}
+      {productsLoading && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 10,
+          padding: '40px 0',
+          color: 'var(--text-muted)',
+          fontSize: '0.9rem',
+          fontWeight: 600
+        }}>
+          <Loader size={20} style={{ animation: 'spin 1s linear infinite', color: 'var(--primary-500)' }} />
+          <span>{lang === 'hi' ? 'उत्पाद लोड हो रहे हैं…' : 'Loading products…'}</span>
+        </div>
+      )}
+
+      {/* ── DB fetch error ──────────────────────────────────────────── */}
+      {!productsLoading && productsError && productsError !== 'not_configured' && (
+        <div style={{
+          background: '#FEF2F2',
+          border: '1.5px solid #F87171',
+          borderRadius: 'var(--radius-md)',
+          padding: '14px 18px',
+          marginBottom: 20,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 12
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <AlertTriangle size={18} style={{ color: '#DC2626', flexShrink: 0 }} />
+            <span style={{ fontSize: '0.88rem', color: '#B91C1C', fontWeight: 600 }}>
+              {lang === 'hi' ? 'डेटा लोड करने में त्रुटि हुई' : 'Error loading marketplace data'}
+            </span>
+          </div>
+          {onRefresh && (
+            <button className="btn btn-secondary" style={{ padding: '6px 14px', fontSize: '0.82rem' }} onClick={onRefresh}>
+              <RefreshCw size={14} />
+              <span>{lang === 'hi' ? 'पुन: प्रयास' : 'Retry'}</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Search & Filter Toolbar */}
       <div className="filter-search-bar">
@@ -266,18 +347,24 @@ export default function MarketplaceView({
                   >
                     {lang === 'hi' ? product.nameHi : product.nameEn}
                   </h3>
-                  <button
-                    type="button"
-                    className="item-delete-btn"
-                    title={t.deleteItemTooltip}
-                    aria-label={t.deleteItemTooltip}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setItemToDelete(product);
-                    }}
-                  >
-                    <X size={15} />
-                  </button>
+                  {/* Only the owner or demo listings can be deleted */}
+                  {(product._fromDb
+                    ? currentUser?.id && product.ownerId === currentUser.id
+                    : true  // demo seed items are always deletable locally
+                  ) && (
+                    <button
+                      type="button"
+                      className="item-delete-btn"
+                      title={t.deleteItemTooltip}
+                      aria-label={t.deleteItemTooltip}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setItemToDelete(product);
+                      }}
+                    >
+                      <X size={15} />
+                    </button>
+                  )}
                 </div>
 
                 <div className="seller-info-row">

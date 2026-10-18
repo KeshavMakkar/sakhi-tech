@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@react-oauth/google": "^0.13.5",
+    "@supabase/supabase-js": "^2.118.0",
     "canvas-confetti": "^1.9.4",
     "lucide-react": "^1.58.0",
     "react": "^19.2.8",

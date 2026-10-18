@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Header from './components/Header';
 import BottomNav from './components/BottomNav';
 import HomeView from './components/HomeView';
@@ -9,10 +9,18 @@ import AddProductView from './components/AddProductView';
 import OpportunitiesView from './components/OpportunitiesView';
 import SignInView from './components/SignInView';
 import { AuthProvider } from './context/AuthContext';
-import { INITIAL_PRODUCTS, getCategoryPlaceholder } from './data/products';
+import { useAuth } from './context/AuthContext';
+import { INITIAL_PRODUCTS } from './data/products';
 import { TRANSLATIONS } from './data/translations';
+import { isSupabaseConfigured } from './lib/supabase';
+import {
+  fetchProducts,
+  deleteProduct,
+  subscribeToProducts,
+} from './lib/productsService';
 
-const STORAGE_KEY = 'sakhi_bazaar_products_v2';
+// localStorage is only used for UI preferences (route, language)
+// Products now live in Supabase – never in localStorage
 const VALID_ROUTES = ['home', 'learn', 'calculator', 'marketplace', 'add-product', 'opportunities', 'signin'];
 
 function getRouteFromLocation() {
@@ -43,32 +51,14 @@ function getRouteFromLocation() {
   return 'home';
 }
 
-function sanitizeProductsList(rawProducts) {
-  if (!Array.isArray(rawProducts) || rawProducts.length === 0) return INITIAL_PRODUCTS;
-  
-  return rawProducts.map(p => {
-    const match = INITIAL_PRODUCTS.find(item => item.id === p.id);
-    if (match) {
-      return {
-        ...p,
-        image: match.image,
-        imageAlt: match.imageAlt,
-        isPlaceholder: match.isPlaceholder
-      };
-    }
-    if (typeof p.image === 'string' && p.image.includes('images.unsplash.com')) {
-      return {
-        ...p,
-        image: getCategoryPlaceholder(p.category),
-        imageAlt: `${p.nameEn || p.nameHi} - Category placeholder for ${p.category}`,
-        isPlaceholder: true
-      };
-    }
-    return p;
-  });
-}
+// DEMO_PRODUCTS are the 8 seed/sample listings.
+// They are shown ONLY when Supabase is not configured, so users always see
+// something useful while setting up the backend. They are never written to
+// Supabase and are clearly labelled as demo items.
+const DEMO_PRODUCTS = INITIAL_PRODUCTS;
 
 function SakhiApp() {
+  const { user } = useAuth();
   const [lang, setLang] = useState('hi'); // Default to Hindi for authentic rural connection, toggleable to English anytime
   const [currentTab, setCurrentTab] = useState(getRouteFromLocation);
   const [selectedCategory, setSelectedCategory] = useState('all');
@@ -76,30 +66,68 @@ function SakhiApp() {
   const [newlyAddedId, setNewlyAddedId] = useState(null);
   const [deletedProductRecord, setDeletedProductRecord] = useState(null);
 
-  // Load products from localStorage or fallback to INITIAL_PRODUCTS
-  const [products, setProducts] = useState(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY) || localStorage.getItem('sakhi_bazaar_products_v1');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return sanitizeProductsList(parsed);
-        }
-      }
-    } catch {
-      // Fallback
-    }
-    return INITIAL_PRODUCTS;
-  });
+  // ── Supabase product state ─────────────────────────────────────
+  const [products, setProducts] = useState([]);
+  const [productsLoading, setProductsLoading] = useState(true);
+  const [productsError, setProductsError] = useState(null); // null | 'not_configured' | string
 
-  // Save to localStorage when products change
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(products));
-    } catch {
-      // Safe fallback
+  /** Load (or reload) all active listings from Supabase. */
+  const loadProducts = useCallback(async () => {
+    if (!isSupabaseConfigured) {
+      // Show demo seed data so the UI is never empty for first-time setup
+      setProducts(DEMO_PRODUCTS);
+      setProductsLoading(false);
+      setProductsError('not_configured');
+      return;
     }
-  }, [products]);
+    setProductsLoading(true);
+    setProductsError(null);
+    const { data, error } = await fetchProducts();
+    if (error && error !== 'not_configured') {
+      setProductsError(error);
+    }
+    setProducts(data);
+    setProductsLoading(false);
+  }, []);
+
+  // Initial fetch
+  useEffect(() => {
+    loadProducts();
+  }, [loadProducts]);
+
+  // Refresh listings when the user switches back to the marketplace tab
+  // (also covers returning from another browser tab via visibilitychange)
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && currentTab === 'marketplace') {
+        loadProducts();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [currentTab, loadProducts]);
+
+  // Reload when the user navigates to the marketplace tab
+  useEffect(() => {
+    if (currentTab === 'marketplace') {
+      loadProducts();
+    }
+  }, [currentTab, loadProducts]);
+
+  // Supabase Realtime: add new listings without a manual refresh
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+    const channel = subscribeToProducts((newProduct) => {
+      setProducts((prev) => {
+        // Avoid duplicates (our own optimistic insert arrives first)
+        if (prev.some((p) => p.id === newProduct.id)) return prev;
+        return [newProduct, ...prev];
+      });
+    });
+    return () => {
+      channel?.unsubscribe();
+    };
+  }, []);
 
   // Sync hash routing on navigation
   const handleSelectTab = (tab) => {
@@ -158,7 +186,11 @@ function SakhiApp() {
   };
 
   const handleProductCreated = (newProd) => {
-    setProducts(prev => [newProd, ...prev]);
+    // Optimistically prepend – realtime will deduplicate if it arrives too
+    setProducts((prev) => {
+      if (prev.some((p) => p.id === newProd.id)) return prev;
+      return [newProd, ...prev];
+    });
     setNewlyAddedId(newProd.id);
   };
 
@@ -168,13 +200,29 @@ function SakhiApp() {
   };
 
   // Delete product with Undo support
-  const handleDeleteProduct = (productId) => {
-    const index = products.findIndex(p => p.id === productId);
+  const handleDeleteProduct = async (productId) => {
+    const index = products.findIndex((p) => p.id === productId);
     if (index === -1) return;
     const removed = products[index];
-    const newProducts = products.filter(p => p.id !== productId);
-    setProducts(newProducts);
+
+    // Optimistic UI update first
+    setProducts((prev) => prev.filter((p) => p.id !== productId));
     setDeletedProductRecord({ product: removed, index });
+
+    // If this was a real DB product, soft-delete it
+    if (isSupabaseConfigured && removed._fromDb && user?.id) {
+      const { error } = await deleteProduct(productId, user.id);
+      if (error) {
+        // Roll back on failure
+        setProducts((prev) => {
+          const copy = [...prev];
+          copy.splice(index, 0, removed);
+          return copy;
+        });
+        setDeletedProductRecord(null);
+        console.error('[App] deleteProduct error:', error);
+      }
+    }
   };
 
   const handleUndoDelete = () => {
@@ -236,6 +284,9 @@ function SakhiApp() {
         {currentTab === 'marketplace' && (
           <MarketplaceView
             products={products}
+            productsLoading={productsLoading}
+            productsError={productsError}
+            onRefresh={loadProducts}
             selectedCategory={selectedCategory}
             onSelectCategory={setSelectedCategory}
             onSelectTab={handleSelectTab}
@@ -244,6 +295,7 @@ function SakhiApp() {
             onDeleteProduct={handleDeleteProduct}
             deletedRecord={deletedProductRecord}
             onUndoDelete={handleUndoDelete}
+            currentUser={user}
           />
         )}
 
