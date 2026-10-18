@@ -20,6 +20,7 @@ export default function SignInView({ onContinue, lang = 'hi' }) {
     isAuthenticated, 
     isConfigured, 
     authError, 
+    isAuthenticating,
     handleGoogleSuccess, 
     handleGoogleError, 
     logout 
@@ -180,7 +181,7 @@ export default function SignInView({ onContinue, lang = 'hi' }) {
 
         {/* Real Google OAuth Login Button */}
         {isConfigured ? (
-          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 20 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: 20 }}>
             <GoogleLogin
               onSuccess={handleGoogleSuccess}
               onError={handleGoogleError}
@@ -190,6 +191,11 @@ export default function SignInView({ onContinue, lang = 'hi' }) {
               shape="pill"
               text="signin_with"
             />
+            {isAuthenticating && (
+              <p style={{ fontSize: '0.85rem', color: 'var(--primary-600)', fontWeight: 600, marginTop: 10 }}>
+                {isHindi ? 'सुपबेस सत्र प्रमाणित किया जा रहा है…' : 'Authenticating Supabase session…'}
+              </p>
+            )}
           </div>
         ) : (
           /* When Google Client ID is not yet configured in environment variables */

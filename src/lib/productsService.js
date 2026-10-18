@@ -4,7 +4,7 @@
  *
  * DB Table: public.products
  *   id             UUID DEFAULT gen_random_uuid() PRIMARY KEY
- *   owner_id       TEXT NOT NULL (Google OAuth sub ID)
+ *   owner_id       UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE
  *   owner_email    TEXT (optional)
  *   owner_name     TEXT (optional)
  *   name           TEXT NOT NULL
@@ -25,6 +25,8 @@
  *   updated_at     TIMESTAMPTZ DEFAULT NOW()
  */
 import { supabase } from './supabase';
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /* ─── Type Sanitizers & Helpers ───────────────────────────────────── */
 
@@ -50,17 +52,22 @@ function formatDatabaseError(error, action = 'save product') {
 
   // PGRST204: Missing column in PostgREST schema cache
   if (code === 'PGRST204' || msg.includes('schema cache')) {
-    return `Database schema mismatch: a column is missing from the "products" table in Supabase. Please run the migration script in Supabase SQL Editor and reload the schema cache. (Details: ${msg})`;
+    return `Database schema mismatch: a column is missing from the "products" table in Supabase. Please execute the additive migration script in Supabase SQL Editor and reload the schema cache. (${msg})`;
   }
 
   // 42501: Row Level Security policy failure
   if (code === '42501' || msg.includes('violates row-level security')) {
-    return `Database permission error (RLS): The row-level security policy rejected this ${action}. Ensure the latest RLS policies from the migration are applied in Supabase.`;
+    return `Database permission error (RLS): Row-Level Security blocked this ${action}. Please verify you are signed in with an active Supabase session.`;
   }
 
-  // 22P02: Type mismatch, e.g. UUID vs TEXT on owner_id
+  // 22P02: Type mismatch on UUID
   if (code === '22P02' && (msg.includes('uuid') || details.includes('uuid'))) {
-    return `Database type mismatch: "owner_id" is configured as UUID instead of TEXT. Please run the SQL migration in Supabase to convert owner_id to TEXT for Google OAuth.`;
+    return `Database type error: owner_id must be a valid Supabase user UUID. Please verify that your Google sign-in is properly authenticated with Supabase.`;
+  }
+
+  // 23503: Foreign key violation (user doesn't exist in auth.users)
+  if (code === '23503' && (msg.includes('owner_id') || msg.includes('auth.users'))) {
+    return `Authentication error: The current user does not exist in Supabase auth.users. Please sign in again so your Google session is registered with Supabase.`;
   }
 
   // 23502: NOT NULL violation
@@ -77,7 +84,7 @@ function formatDatabaseError(error, action = 'save product') {
 }
 
 /**
- * Maps a Supabase row → the shape expected by the UI components.
+ * Maps a Supabase row → the shape expected by UI components.
  * Guarantees fallbacks so UI components never encounter undefined values.
  */
 function rowToProduct(row) {
@@ -89,7 +96,6 @@ function rowToProduct(row) {
 
   return {
     id: String(row.id),
-    // Bilingual display: for user-created products, English and Hindi fall back gracefully
     nameEn: row.name || 'Untitled Listing',
     nameHi: row.name || 'अनाम उत्पाद',
     category: row.category || 'crafts',
@@ -152,11 +158,11 @@ export async function fetchProducts() {
 
 /**
  * Insert a new product listing.
- * Validates all required fields before making the network call and sanitizes
- * the payload so no undefined or extraneous properties are sent to Supabase.
+ * Requires a valid Supabase session. Uses the authenticated Supabase user's
+ * UUID (session.user.id) as the owner_id, preserving UUID column type and owner RLS.
  *
  * @param {Object} formData
- * @param {Object} user - Authenticated user from AuthContext (Google JWT payload)
+ * @param {Object} user - User object from AuthContext
  * @returns {Promise<{ data: Object | null, error: string | null }>}
  */
 export async function insertProduct(formData, user) {
@@ -164,10 +170,26 @@ export async function insertProduct(formData, user) {
     return { data: null, error: 'Supabase is not configured. Please check environment variables.' };
   }
 
-  // 1. Authenticated user validation
-  const ownerId = cleanString(user?.id);
-  if (!ownerId) {
-    return { data: null, error: 'Authentication required. Please sign in with Google to list a product.' };
+  // 1. Verify active Supabase session
+  const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+  if (sessionError) {
+    return { data: null, error: `Authentication error: ${sessionError.message}` };
+  }
+
+  const sessionUser = sessionData?.session?.user;
+  if (!sessionUser?.id) {
+    return { 
+      data: null, 
+      error: 'A valid Supabase session is required to publish a product. Please sign in with Google first.' 
+    };
+  }
+
+  const ownerId = sessionUser.id;
+  if (!UUID_REGEX.test(ownerId)) {
+    return {
+      data: null,
+      error: 'Invalid Supabase user ID format. An authenticated UUID is required.'
+    };
   }
 
   // 2. Form field validation
@@ -191,9 +213,9 @@ export async function insertProduct(formData, user) {
   const badgeText = isPlaceholder ? 'Artisan Listing' : 'Photo Attached';
 
   const row = {
-    owner_id: ownerId,
-    owner_email: cleanString(user?.email),
-    owner_name: cleanString(user?.name),
+    owner_id: ownerId, // Valid Supabase Auth UUID
+    owner_email: cleanString(sessionUser.email || user?.email),
+    owner_name: cleanString(sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || user?.name),
     name,
     description: cleanString(formData?.description),
     price,
@@ -234,24 +256,30 @@ export async function insertProduct(formData, user) {
  * Enforces ownership check: only the listing owner can delete their item.
  *
  * @param {string} productId
- * @param {string} userId - Google user ID
+ * @param {string} userId - Supabase user UUID
  * @returns {Promise<{ error: string | null }>}
  */
 export async function deleteProduct(productId, userId) {
   if (!supabase) return { error: 'not_configured' };
   
   const cleanProdId = cleanString(productId);
-  const cleanUserId = cleanString(userId);
-
   if (!cleanProdId) return { error: 'Product ID is required for deletion.' };
-  if (!cleanUserId) return { error: 'Authentication required to delete a listing.' };
+
+  // Verify authenticated Supabase session
+  const { data: sessionData } = await supabase.auth.getSession();
+  const sessionUser = sessionData?.session?.user;
+  const ownerUuid = sessionUser?.id || userId;
+
+  if (!ownerUuid || !UUID_REGEX.test(ownerUuid)) {
+    return { error: 'Authentication required. Please sign in to delete a listing.' };
+  }
 
   try {
     const { error } = await supabase
       .from('products')
       .update({ status: 'deleted', updated_at: new Date().toISOString() })
       .eq('id', cleanProdId)
-      .eq('owner_id', cleanUserId);
+      .eq('owner_id', ownerUuid);
 
     if (error) {
       console.error('[productsService] deleteProduct error:', error);
@@ -267,19 +295,27 @@ export async function deleteProduct(productId, userId) {
 
 /**
  * Upload an image file to Supabase Storage bucket 'product-images' and return public URL.
- * Bucket must have public read enabled.
+ * Bucket must have public read enabled and authenticated write policy.
  *
  * @param {File} file
- * @param {string} userId
+ * @param {string} userId - Supabase user UUID
  * @returns {Promise<{ url: string | null, error: string | null }>}
  */
 export async function uploadProductImage(file, userId) {
   if (!supabase) return { url: null, error: 'not_configured' };
-  if (!file || !userId) return { url: null, error: 'Missing image file or user credentials' };
+  if (!file) return { url: null, error: 'Missing image file' };
+
+  // Verify authenticated session
+  const { data: sessionData } = await supabase.auth.getSession();
+  const sessionUser = sessionData?.session?.user;
+  const uid = sessionUser?.id || userId;
+
+  if (!uid) {
+    return { url: null, error: 'Authentication required to upload photos' };
+  }
 
   try {
-    // Sanitize user ID and filename for storage path
-    const safeUserId = String(userId).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeUserId = String(uid).replace(/[^a-zA-Z0-9_-]/g, '_');
     const ext = (file.name || 'jpg').split('.').pop().toLowerCase().replace(/[^a-z0-9]/g, '');
     const safeExt = ext || 'jpg';
     const filePath = `${safeUserId}/${Date.now()}.${safeExt}`;

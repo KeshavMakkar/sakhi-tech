@@ -1,49 +1,46 @@
 -- ==============================================================================
--- Sakhi Tech: Products Table Schema Migration & PostgREST Cache Reload
+-- Sakhi Tech: Safe Additive Products Schema Migration & Secure RLS
 -- ==============================================================================
--- Safe, additive, data-preserving migration.
--- Fixes missing columns (badge, contact_phone, unit, shg_name, is_placeholder,
--- owner_email, owner_name), converts owner_id from UUID to TEXT for Google OAuth,
--- updates RLS policies, and reloads the PostgREST schema cache.
+-- Preserves owner_id as UUID referencing auth.users(id).
+-- Enforces strict owner-based Row Level Security (auth.uid() = owner_id).
+-- Adds missing product columns without dropping or modifying existing data.
+-- Configures secure storage upload policy for authenticated users.
+-- Reloads the PostgREST schema cache.
 -- ==============================================================================
 
--- 1. Ensure table exists with core columns
+-- 1. Ensure table exists with UUID owner_id
 CREATE TABLE IF NOT EXISTS public.products (
   id            UUID        DEFAULT gen_random_uuid() PRIMARY KEY,
-  owner_id      TEXT        NOT NULL,
+  owner_id      UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   name          TEXT        NOT NULL,
-  price         NUMERIC     NOT NULL,
+  price         NUMERIC     NOT NULL CHECK (price > 0),
   category      TEXT        NOT NULL,
-  status        TEXT        DEFAULT 'active',
+  status        TEXT        DEFAULT 'active' CHECK (status IN ('active', 'deleted')),
   created_at    TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 2. Drop any foreign key constraints on owner_id that reference auth.users(id)
---    (Required because the app authenticates via Google OAuth client JWT, not Supabase auth.users)
+-- Ensure foreign key constraint exists if table already existed without it
 DO $$
-DECLARE
-    r RECORD;
 BEGIN
-    FOR r IN (
-        SELECT tc.constraint_name 
-        FROM information_schema.table_constraints AS tc 
-        JOIN information_schema.key_column_usage AS kcu
-          ON tc.constraint_name = kcu.constraint_name
-          AND tc.table_schema = kcu.table_schema
-        WHERE tc.constraint_type = 'FOREIGN KEY' 
-          AND tc.table_schema = 'public'
-          AND tc.table_name = 'products'
-          AND kcu.column_name = 'owner_id'
-    ) LOOP
-        EXECUTE 'ALTER TABLE public.products DROP CONSTRAINT IF EXISTS ' || quote_ident(r.constraint_name);
-    END LOOP;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name
+    WHERE tc.constraint_type = 'FOREIGN KEY'
+      AND tc.table_schema = 'public'
+      AND tc.table_name = 'products'
+      AND kcu.column_name = 'owner_id'
+  ) THEN
+    ALTER TABLE public.products
+      ADD CONSTRAINT products_owner_id_fkey
+      FOREIGN KEY (owner_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+  END IF;
+EXCEPTION
+  WHEN OTHERS THEN
+    NULL;
 END $$;
 
--- 3. Safely convert owner_id to TEXT if it was originally created as UUID
-ALTER TABLE public.products 
-  ALTER COLUMN owner_id TYPE TEXT USING owner_id::TEXT;
-
--- 4. Add all missing columns (additive and data-preserving)
+-- 2. Purely additive columns for missing product form fields
 ALTER TABLE public.products
   ADD COLUMN IF NOT EXISTS owner_email    TEXT,
   ADD COLUMN IF NOT EXISTS owner_name     TEXT,
@@ -59,14 +56,11 @@ ALTER TABLE public.products
   ADD COLUMN IF NOT EXISTS ingredients    TEXT,
   ADD COLUMN IF NOT EXISTS updated_at     TIMESTAMPTZ DEFAULT NOW();
 
--- 5. Guarantee text types and defaults for columns
-ALTER TABLE public.products ALTER COLUMN contact_phone TYPE TEXT USING contact_phone::TEXT;
-ALTER TABLE public.products ALTER COLUMN badge TYPE TEXT USING badge::TEXT;
-ALTER TABLE public.products ALTER COLUMN unit SET DEFAULT '1 piece';
-ALTER TABLE public.products ALTER COLUMN is_placeholder SET DEFAULT TRUE;
-ALTER TABLE public.products ALTER COLUMN status SET DEFAULT 'active';
+-- Ensure phone numbers are stored as TEXT
+ALTER TABLE public.products 
+  ALTER COLUMN contact_phone TYPE TEXT USING contact_phone::TEXT;
 
--- 6. Add performance indexes for marketplace browsing
+-- 3. Create indexes for high-performance marketplace queries
 CREATE INDEX IF NOT EXISTS products_status_created_idx 
   ON public.products (status, created_at DESC);
 
@@ -76,47 +70,54 @@ CREATE INDEX IF NOT EXISTS products_owner_id_idx
 CREATE INDEX IF NOT EXISTS products_category_idx 
   ON public.products (category);
 
--- 7. Reset and update Row Level Security (RLS) policies
+-- 4. Secure Owner-Based Row Level Security (RLS)
 ALTER TABLE public.products ENABLE ROW LEVEL SECURITY;
 
--- Drop legacy or conflicting policies
+-- Drop obsolete or permissive legacy policies
 DROP POLICY IF EXISTS "read_active" ON public.products;
 DROP POLICY IF EXISTS "read_active_listings" ON public.products;
 DROP POLICY IF EXISTS "products_select_active" ON public.products;
 DROP POLICY IF EXISTS "insert_own" ON public.products;
 DROP POLICY IF EXISTS "insert_own_listing" ON public.products;
 DROP POLICY IF EXISTS "products_insert_valid_owner" ON public.products;
+DROP POLICY IF EXISTS "products_insert_own" ON public.products;
 DROP POLICY IF EXISTS "update_own" ON public.products;
 DROP POLICY IF EXISTS "update_own_listing" ON public.products;
 DROP POLICY IF EXISTS "products_update_owner" ON public.products;
+DROP POLICY IF EXISTS "products_update_own" ON public.products;
 DROP POLICY IF EXISTS "delete_own" ON public.products;
 DROP POLICY IF EXISTS "delete_own_listing" ON public.products;
 DROP POLICY IF EXISTS "products_delete_owner" ON public.products;
+DROP POLICY IF EXISTS "products_delete_own" ON public.products;
 DROP POLICY IF EXISTS "Enable read access for all users" ON public.products;
 DROP POLICY IF EXISTS "Enable insert for authenticated users only" ON public.products;
 DROP POLICY IF EXISTS "Enable insert for users based on user_id" ON public.products;
 
--- (a) SELECT: Anyone can read active marketplace products
+-- (a) SELECT: Anyone can view active marketplace listings
 CREATE POLICY "products_select_active"
   ON public.products FOR SELECT
   USING (status = 'active');
 
--- (b) INSERT: Allow inserting if owner_id is provided and valid
-CREATE POLICY "products_insert_valid_owner"
+-- (b) INSERT: Only authenticated users can insert, strictly where owner_id matches auth.uid()
+CREATE POLICY "products_insert_own"
   ON public.products FOR INSERT
-  WITH CHECK (owner_id IS NOT NULL AND length(trim(owner_id)) > 0);
+  TO authenticated
+  WITH CHECK (auth.uid() = owner_id);
 
--- (c) UPDATE: Allow updating (used for soft-delete status='deleted')
-CREATE POLICY "products_update_owner"
+-- (c) UPDATE: Only the listing owner can update their own rows (status='deleted')
+CREATE POLICY "products_update_own"
   ON public.products FOR UPDATE
-  USING (owner_id IS NOT NULL AND length(trim(owner_id)) > 0);
+  TO authenticated
+  USING (auth.uid() = owner_id)
+  WITH CHECK (auth.uid() = owner_id);
 
--- (d) DELETE: Allow hard delete if needed
-CREATE POLICY "products_delete_owner"
+-- (d) DELETE: Only the listing owner can delete their own rows
+CREATE POLICY "products_delete_own"
   ON public.products FOR DELETE
-  USING (owner_id IS NOT NULL AND length(trim(owner_id)) > 0);
+  TO authenticated
+  USING (auth.uid() = owner_id);
 
--- 8. Enable Realtime updates on products table
+-- 5. Enable Realtime updates on products table
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -127,33 +128,25 @@ BEGIN
   END IF;
 END $$;
 
--- 9. Ensure Storage bucket 'product-images' exists and is publicly accessible
+-- 6. Storage Bucket & Policies for product photos
 INSERT INTO storage.buckets (id, name, public)
 VALUES ('product-images', 'product-images', TRUE)
 ON CONFLICT (id) DO NOTHING;
 
-DO $$
-BEGIN
-  -- Storage upload policy
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies 
-    WHERE schemaname = 'storage' AND tablename = 'objects' AND policyname = 'allow_product_image_uploads'
-  ) THEN
-    CREATE POLICY "allow_product_image_uploads"
-      ON storage.objects FOR INSERT
-      WITH CHECK (bucket_id = 'product-images');
-  END IF;
+DROP POLICY IF EXISTS "public_product_image_read" ON storage.objects;
+DROP POLICY IF EXISTS "allow_product_image_uploads" ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_product_image_uploads" ON storage.objects;
 
-  -- Storage public read policy
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policies 
-    WHERE schemaname = 'storage' AND tablename = 'objects' AND policyname = 'public_product_image_read'
-  ) THEN
-    CREATE POLICY "public_product_image_read"
-      ON storage.objects FOR SELECT
-      USING (bucket_id = 'product-images');
-  END IF;
-END $$;
+-- Public read for product images
+CREATE POLICY "public_product_image_read"
+  ON storage.objects FOR SELECT
+  USING (bucket_id = 'product-images');
 
--- 10. CRITICAL: Force PostgREST to reload its schema cache immediately
+-- Only authenticated users can upload product photos
+CREATE POLICY "authenticated_product_image_uploads"
+  ON storage.objects FOR INSERT
+  TO authenticated
+  WITH CHECK (bucket_id = 'product-images');
+
+-- 7. Force PostgREST to reload schema cache
 NOTIFY pgrst, 'reload schema';

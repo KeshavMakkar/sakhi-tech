@@ -1,11 +1,13 @@
 /**
  * Supabase client initialisation.
  *
- * Required environment variables (add to .env and Vercel dashboard):
+ * Configured with session persistence and auto token refresh so that
+ * Supabase Auth sessions (from Google ID token exchange) remain active
+ * across page reloads and tab navigations.
+ *
+ * Required environment variables:
  *   VITE_SUPABASE_URL      – Project URL from Supabase → Settings → API
  *   VITE_SUPABASE_ANON_KEY – Publishable "anon" key (safe for browsers)
- *
- * NEVER put the service-role key in browser code.
  */
 import { createClient } from '@supabase/supabase-js';
 
@@ -21,10 +23,9 @@ export const isSupabaseConfigured =
 export const supabase = isSupabaseConfigured
   ? createClient(supabaseUrl, supabaseAnonKey, {
       auth: {
-        // We handle auth ourselves via Google OAuth tokens (JWT from Google Identity
-        // Services) rather than Supabase's built-in auth flow.
-        persistSession: false,
-        autoRefreshToken: false,
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
       },
     })
   : null;

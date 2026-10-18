@@ -27,7 +27,7 @@ export default function AddProductView({
   lang 
 }) {
   const t = TRANSLATIONS[lang];
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, hasSupabaseSession } = useAuth();
 
   // Form state
   const [name, setName] = useState('');
@@ -93,6 +93,16 @@ export default function AddProductView({
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    if (isSupabaseConfigured && !hasSupabaseSession) {
+      setSubmitError(
+        lang === 'hi'
+          ? 'उत्पाद प्रकाशित करने के लिए सक्रिय सुपबेस सत्र आवश्यक है। कृपया साइन-इन टैब पर जाकर पुनः गूगल से साइन-इन करें।'
+          : 'A valid Supabase session is required before publishing products. Please sign in with Google to establish your session.'
+      );
+      return;
+    }
+
     const validationErrors = validate();
     if (Object.keys(validationErrors).length > 0) {
       setErrors(validationErrors);
