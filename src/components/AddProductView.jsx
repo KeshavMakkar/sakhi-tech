@@ -9,17 +9,14 @@ import { insertProduct, uploadProductImage } from '../lib/productsService';
 import { 
   PlusCircle, 
   Upload, 
-  Check, 
   Sparkles, 
   AlertCircle, 
-  Eye, 
   ArrowRight, 
   Store, 
   RefreshCw,
   ShieldCheck,
   LogIn,
-  Loader,
-  Database
+  Loader
 } from 'lucide-react';
 
 export default function AddProductView({ 
@@ -84,7 +81,10 @@ export default function AddProductView({
     const errs = {};
     if (!name.trim()) errs.name = lang === 'hi' ? 'उत्पाद का नाम आवश्यक है' : 'Product name is required';
     if (!category) errs.category = lang === 'hi' ? 'श्रेणी चुनें' : 'Category is required';
-    if (!price || parseFloat(price) <= 0) errs.price = lang === 'hi' ? 'मान्य कीमत दर्ज करें' : 'Valid price is required';
+    const parsedPrice = parseFloat(price);
+    if (!price || isNaN(parsedPrice) || parsedPrice <= 0) {
+      errs.price = lang === 'hi' ? 'मान्य कीमत (शून्य से अधिक) दर्ज करें' : 'Enter a valid price greater than 0';
+    }
     if (!sellerName.trim()) errs.sellerName = lang === 'hi' ? 'कारीगर का नाम आवश्यक है' : 'Artisan name is required';
     if (!location.trim()) errs.location = lang === 'hi' ? 'गाँव या शहर का नाम आवश्यक है' : 'Location is required';
     if (!description.trim()) errs.description = lang === 'hi' ? 'संक्षिप्त विवरण आवश्यक है' : 'Description is required';
@@ -104,7 +104,9 @@ export default function AddProductView({
     setIsSubmitting(true);
 
     const isPlaceholderImg =
-      typeof selectedImage === 'string' && selectedImage.startsWith('data:') === false && selectedImage.includes('/placeholders/');
+      typeof selectedImage === 'string' &&
+      !selectedImage.startsWith('data:') &&
+      selectedImage.includes('/placeholders/');
 
     // ── Upload image to Supabase Storage if user picked a file ──────
     let imageUrl = isPlaceholderImg ? selectedImage : null;
@@ -137,12 +139,12 @@ export default function AddProductView({
       name: name.trim(),
       description: description.trim(),
       price: parseFloat(price),
-      unit: unit.trim() || '1 pc',
+      unit: unit.trim() || '1 piece',
       category,
       sellerName: sellerName.trim(),
       shgName: shgName.trim(),
       location: location.trim(),
-      phone: phone.trim() || '',
+      phone: phone.trim(),
       imageUrl: imageUrl || getCategoryPlaceholder(category),
       isPlaceholder,
     };
@@ -152,11 +154,7 @@ export default function AddProductView({
     if (isSupabaseConfigured) {
       const { data, error } = await insertProduct(formData, user);
       if (error) {
-        setSubmitError(
-          lang === 'hi'
-            ? `उत्पाद सहेजने में त्रुटि: ${error}`
-            : `Failed to save product: ${error}`
-        );
+        setSubmitError(error);
         setIsSubmitting(false);
         return;
       }
